@@ -1,9 +1,8 @@
 package com.lyg6772.batch;
 
 import com.lyg6772.util.InputValueException;
-import org.apache.spark.SparkConf;
+import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
-import org.apache.spark.SparkContext;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.Row;
@@ -17,15 +16,14 @@ import java.util.Locale;
 import java.util.Properties;
 
 public class BehaviorETLClass {
-    private static Logger logger = Logger.getLogger(BehaviorETLClass.class);
+    private static final Logger logger = Logger.getLogger(BehaviorETLClass.class);
     static final String appName = "EcommerceEventETL";
     static Properties prop;
     static String etlDate = null;
-    ;
     static SparkSession sparkSession;
 
     public static void main(String[] args){
-        Dataset<Row> dataSet = null;
+        Dataset<Row> dataSet;
         logger.info(appName+" batch start");
         try {
             initBatch();
@@ -53,7 +51,14 @@ public class BehaviorETLClass {
             logger.error("error occured in extractData", e);
             return;
         }
-        loadData(dataSet);
+        dataSet.checkpoint();
+        try {
+            loadData(dataSet);
+        }
+        catch (Exception e){
+            logger.error("error occured in loadData", e);
+            return;
+        }
         logger.info("Batch finished");
     }
 
@@ -62,7 +67,7 @@ public class BehaviorETLClass {
         InputStream is = BehaviorETLClass.class.getResourceAsStream("/config.properties");
         prop.load(is);
         etlDate = prop.getProperty("data.ETLDate");
-        if (etlDate.length() < 6){
+        if (StringUtils.isNotEmpty(etlDate) && etlDate.length() < 6){
             throw new InputValueException("date.etlDate must be like YYYYMM");
         }
         sparkSession = SparkSession.builder()
@@ -74,44 +79,20 @@ public class BehaviorETLClass {
                 .config("spark.hadoop.fs.hdfs.server", org.apache.hadoop.hdfs.server.namenode.NameNode.class.getName())
                 .config("spark.hadoop.conf", org.apache.hadoop.hdfs.HdfsConfiguration.class.getName())
                 .config("spark.sql.warehouse.dir", prop.getProperty("spark.sql.warehouse.dir"))
-                .config("hive.metastore.uris", "thrift://localhost:9083") // Hive Metastore URI 설정
-                .config("hive.metastore.local", "true")
-                .config("hive.metastore.warehouse.dir", prop.getProperty("spark.sql.warehouse.dir"))
-                .config("hive.exec.dynamic.partition", "true") // 동적 파티션 설정
-                .config("hive.exec.dynamic.partition.mode", "nonstrict") // 동적 파티션 모드 설정
+                .config("spark.sql.hive.metastore.uris", "thrift://localhost:9083") // Hive Metastore URI 설정
+                .config("spark.sql.streaming.checkpointLocation", prop.getProperty("hdfs.checkPointFolderPath"))
                 .enableHiveSupport()
                 .getOrCreate();
 
-        createHiveExternalTable();
+
     }
 
-    private static void createHiveExternalTable(){
-        sparkSession.sql("CREATE EXTERNAL TABLE IF NOT EXISTS " +
-                prop.getProperty("hive.table.external.log.name", "ecommerce_behavior_log") +
-                " (" +
-                "event_time TIMESTAMP, " +
-                "event_type STRING, " +
-                "product_id BIGINT, " +
-                "category_id STRING, " +
-                "category_code STRING, " +
-                "brand STRING, " +
-                "price DOUBLE, " +
-                "user_id BIGINT, " +
-                "user_session STRING" +
-                ") PARTITIONED BY (year STRING, month STRING, day STRING) " +
-                "ROW FORMAT SERDE 'parquet.hive.serde.ParquetHiveSerDe' " +
-                "STORED AS INPUTFORMAT 'parquet.hive.DeprecatedParquetInputFormat' " +
-                "OUTPUTFORMAT 'parquet.hive.DeprecatedParquetOutputFormat' " +
-                "TBLPROPERTIES (\"parquet.compression\"=\"SNAPPY\") " +
-                "LOCATION '" +
-                prop.getProperty("spark.hadoop.fs.defaultFS") +
-                prop.getProperty("hdfs.parquetFolderPath", "/tmp/parquet") + "'");
-    }
+
 
     private static Dataset<Row> extractData(String etlDate) throws IOException{
         String rawFilePath;
         LocalDate baseDate;
-        if (!etlDate.isEmpty()) {
+        if (StringUtils.isNotEmpty(etlDate)) {
             baseDate = LocalDate.parse(etlDate+"01", DateTimeFormatter.ofPattern("yyyyMMdd"));
         }
         else{
@@ -140,11 +121,42 @@ public class BehaviorETLClass {
 
         dataSet.write()
                 .format("parquet")
-                .mode("append") // 기존 파티션 덮어쓰기 설정
+                .mode("overwrite") // 기존 파티션 덮어쓰기 설정
                 .partitionBy("year", "month", "day")
-                .saveAsTable(prop.getProperty("hive.table.external.log.name"));
+                .option("compression", "snappy")
+                .save(prop.getProperty("spark.sql.warehouse.dir") +
+                        prop.getProperty("hive.table.external.log.name"));
 
-// Hive Metastore에서 파티션 정보 갱신
+        createHiveExternalTable();
+
         sparkSession.sql("MSCK REPAIR TABLE " + prop.getProperty("hive.table.external.log.name"));
+
+    }
+
+    private static void createHiveExternalTable(){
+        String tableName = prop.getProperty("hive.table.external.log.name", "ecommerce_behavior_log");
+        sparkSession.sql("CREATE EXTERNAL TABLE IF NOT EXISTS " +
+                tableName +
+                " (" +
+                "event_time TIMESTAMP, " +
+                "event_type STRING, " +
+                "product_id BIGINT, " +
+                "category_id STRING, " +
+                "category_code STRING, " +
+                "brand STRING, " +
+                "price DOUBLE, " +
+                "user_id BIGINT, " +
+                "user_session STRING" +
+                ") PARTITIONED BY (year STRING, month STRING, day STRING) " +
+                "STORED AS PARQUET " +
+                "LOCATION '" +
+                prop.getProperty("spark.hadoop.fs.defaultFS") +
+                prop.getProperty("hdfs.parquetFolderPath") +
+                tableName +
+                "' " +
+                "TBLPROPERTIES ('parquet.compression'='SNAPPY' ); ")
+        ;
+        sparkSession.sql("SHOW TABLES;").show();
+
     }
 }
