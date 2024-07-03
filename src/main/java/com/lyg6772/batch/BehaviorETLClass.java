@@ -40,18 +40,19 @@ public class BehaviorETLClass {
             logger.error("file not exists", ioe);
             return;
         }
+
         catch (Exception e){
             logger.error("error occured in extractData", e);
             return;
         }
-
+        // dataSet.checkpoint();
         try{
             dataSet = transferData(dataSet);
         }catch (Exception e){
             logger.error("error occured in extractData", e);
             return;
         }
-        dataSet.checkpoint();
+        //dataSet.checkpoint();
         try {
             loadData(dataSet);
         }
@@ -79,8 +80,11 @@ public class BehaviorETLClass {
                 .config("spark.hadoop.fs.hdfs.server", org.apache.hadoop.hdfs.server.namenode.NameNode.class.getName())
                 .config("spark.hadoop.conf", org.apache.hadoop.hdfs.HdfsConfiguration.class.getName())
                 .config("spark.sql.warehouse.dir", prop.getProperty("spark.sql.warehouse.dir"))
-                .config("spark.sql.hive.metastore.uris", "thrift://localhost:9083") // Hive Metastore URI 설정
-                .config("spark.sql.streaming.checkpointLocation", prop.getProperty("hdfs.checkPointFolderPath"))
+                .config("spark.sql.hive.metastore.uris", prop.getProperty("hive.metastore.uris"))
+                .config("spark.hadoop.fs.permissions.umask-mode", "000")
+                .config("spark.sql.streaming.checkpointLocation",
+                        prop.getProperty("spark.hadoop.fs.defaultFS") + prop.getProperty("hdfs.checkPointFolderPath")
+                )
                 .enableHiveSupport()
                 .getOrCreate();
 
@@ -121,7 +125,7 @@ public class BehaviorETLClass {
 
         dataSet.write()
                 .format("parquet")
-                .mode("overwrite") // 기존 파티션 덮어쓰기 설정
+                .mode("append") // 기존 파티션 덮어쓰기 설정
                 .partitionBy("year", "month", "day")
                 .option("compression", "snappy")
                 .save(prop.getProperty("spark.sql.warehouse.dir") +
